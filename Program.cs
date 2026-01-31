@@ -5,7 +5,8 @@
 // #define USE_ONCE_WORKER
 // #define DISABLE_RESULT_OUTPUT
 
-using System.Globalization;
+using System.Buffers;
+using System.Buffers.Text;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -66,6 +67,8 @@ var accessIndexes = SortAccessIndexes(totalResults);
 #if !DISABLE_RESULT_OUTPUT
 stdOutputStream.WriteByte((byte)'{');
 #endif
+
+Span<byte> floatingFormatBuffer = stackalloc byte[6];
 for (var index = 0; index < accessIndexes.Length; index++)
 {
     var value = totalResults.Entries[accessIndexes[index]];
@@ -84,12 +87,21 @@ for (var index = 0; index < accessIndexes.Length; index++)
 #if !DISABLE_RESULT_OUTPUT
     stdOutputStream.Write(value.Key);
     stdOutputStream.WriteByte((byte)'=');
-    stdOutputStream.Write(Encoding.UTF8.GetBytes(Round(value.Min / 10.0).ToString("F1", CultureInfo.InvariantCulture)));
+
+
+    Utf8Formatter.TryFormat(Round(value.Min / 10.0), floatingFormatBuffer, out var written,
+        new StandardFormat('F', 1));
+    stdOutputStream.Write(floatingFormatBuffer[..written]);
     stdOutputStream.WriteByte((byte)'/');
-    stdOutputStream.Write(Encoding.UTF8.GetBytes(Get1BrcAverage(value.Total, value.Count)
-        .ToString("F1", CultureInfo.InvariantCulture)));
+    
+    Utf8Formatter.TryFormat(Get1BrcAverage(value.Total, value.Count), floatingFormatBuffer, out written,
+        new StandardFormat('F', 1));
+    stdOutputStream.Write(floatingFormatBuffer[..written]);
     stdOutputStream.WriteByte((byte)'/');
-    stdOutputStream.Write(Encoding.UTF8.GetBytes(Round(value.Max / 10.0).ToString("F1", CultureInfo.InvariantCulture)));
+    
+    Utf8Formatter.TryFormat(Round(value.Max / 10.0), floatingFormatBuffer, out written,
+        new StandardFormat('F', 1));
+    stdOutputStream.Write(floatingFormatBuffer[..written]);
 #endif
     first = false;
 }
