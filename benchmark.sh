@@ -25,7 +25,6 @@ if [ ! -f "$ANSWER_CSV" ]; then
     sh "$OFFICIAL_DIR/calculate_average_baseline.sh" "$DATA_FILE" > "$ANSWER_CSV"
 fi
 
-# --- 3. 循环测试 ---
 results=()
 echo -e "\n\033[36m--- 开始执行 $ITERATIONS 次测试 ---\033[0m"
 
@@ -33,6 +32,7 @@ for ((i=1; i<=ITERATIONS; i++))
 do
     RAW_OUT="$BENCH_DIR/output.$i"
     CSV_OUT="$BENCH_DIR/output.$i.csv"
+    DIFF_OUT="$BENCH_DIR/output.$i.diff"
     
     echo -n "运行 #$i ... "
     
@@ -41,14 +41,15 @@ do
     ./"$EXE_PATH" "$DATA_FILE" > "$RAW_OUT"
     end_time=$(date +%s%N)
     
-    # 转换为 CSV (假设 tocsv.sh 在官方目录下)
     sh "$OFFICIAL_DIR/tocsv.sh" < "$RAW_OUT" > "$CSV_OUT"
     
     # 结果校验
-    if diff -q "$CSV_OUT" "$ANSWER_CSV" > /dev/null; then
+    if diff -u "$ANSWER_CSV" "$CSV_OUT" > "$DIFF_OUT"; then
         CHECK_STR="\033[32mPASS\033[0m"
+        rm "$DIFF_OUT"
     else
         CHECK_STR="\033[31mFAIL\033[0m"
+        err_count=$(grep -c "^[+-][^+-]" "$DIFF_OUT")
     fi
 
     # 计算耗时
@@ -56,6 +57,10 @@ do
     results+=("$ms")
     
     echo -e "\033[33m$ms ms\033[0m [$CHECK_STR]"
+    
+    if [ "$CHECK_STR" == "\033[31mFAIL\033[0m" ]; then
+        echo -e "\033[90m    └─ 发现 $err_count 处不匹配，请查看: $DIFF_OUT\033[0m"
+    fi
 done
 
 # --- 4. 数据分析 ---
@@ -81,4 +86,4 @@ echo -ne "有效最小值 (Min): "; echo -e "\033[32m$min ms\033[0m"
 echo -ne "有效最大值 (Max): "; echo -e "\033[31m$max ms\033[0m"
 echo -ne "有效平均值 (Avg): "; echo -e "\033[36m$avg ms\033[0m"
 echo "------------------------------------"
-echo -e "详细输出已保存至: \033[34m$BENCH_DIR/\033[0m"
+echo -e "详细报告目录: \033[34m$BENCH_DIR/\033[0m"
