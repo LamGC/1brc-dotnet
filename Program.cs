@@ -57,37 +57,37 @@ var stdOutputStream = Console.OpenStandardOutput();
 var accessIndexes = SortAccessIndexes(totalResults);
 
 #if !DISABLE_RESULT_OUTPUT
-    stdOutputStream.WriteByte((byte)'{');
+stdOutputStream.WriteByte((byte)'{');
 #endif
-    for (var index = 0; index < accessIndexes.Length; index++)
+for (var index = 0; index < accessIndexes.Length; index++)
+{
+    var value = totalResults.Entries[accessIndexes[index]];
+    if (value.Count == 0)
     {
-        var value = totalResults.Entries[accessIndexes[index]];
-        if (value.Count == 0)
-        {
-            continue;
-        }
-
-        if (!first)
-        {
-#if !DISABLE_RESULT_OUTPUT
-            stdOutputStream.Write(delimiter);
-#endif
-        }
-
-#if !DISABLE_RESULT_OUTPUT
-        stdOutputStream.Write(value.Key);
-        stdOutputStream.WriteByte((byte)'=');
-        stdOutputStream.Write(Encoding.UTF8.GetBytes(Round(value.Min / 10.0).ToString("F1", CultureInfo.InvariantCulture)));
-        stdOutputStream.WriteByte((byte)'/');
-        stdOutputStream.Write(Encoding.UTF8.GetBytes(Get1BrcAverage(value.Total, value.Count)
-            .ToString("F1", CultureInfo.InvariantCulture)));
-        stdOutputStream.WriteByte((byte)'/');
-        stdOutputStream.Write(Encoding.UTF8.GetBytes(Round(value.Max / 10.0).ToString("F1", CultureInfo.InvariantCulture)));
-#endif
-        first = false;
+        continue;
     }
+
+    if (!first)
+    {
 #if !DISABLE_RESULT_OUTPUT
-    stdOutputStream.WriteByte((byte)'}');
+        stdOutputStream.Write(delimiter);
+#endif
+    }
+
+#if !DISABLE_RESULT_OUTPUT
+    stdOutputStream.Write(value.Key);
+    stdOutputStream.WriteByte((byte)'=');
+    stdOutputStream.Write(Encoding.UTF8.GetBytes(Round(value.Min / 10.0).ToString("F1", CultureInfo.InvariantCulture)));
+    stdOutputStream.WriteByte((byte)'/');
+    stdOutputStream.Write(Encoding.UTF8.GetBytes(Get1BrcAverage(value.Total, value.Count)
+        .ToString("F1", CultureInfo.InvariantCulture)));
+    stdOutputStream.WriteByte((byte)'/');
+    stdOutputStream.Write(Encoding.UTF8.GetBytes(Round(value.Max / 10.0).ToString("F1", CultureInfo.InvariantCulture)));
+#endif
+    first = false;
+}
+#if !DISABLE_RESULT_OUTPUT
+stdOutputStream.WriteByte((byte)'}');
 #endif
 
 #if ENABLE_STOPWATCH
@@ -258,7 +258,7 @@ unsafe long FastParseLong(byte* ptr, long len)
 {
     var isNegative = (char)*ptr == '-';
     long x = (char)*(ptr + (isNegative ? 1 : 0)) - '0';
-    for (long i = (isNegative ? 2 : 1); i < len; i++)
+    for (long i = isNegative ? 2 : 1; i < len; i++)
     {
         x = x * 10 + ((char)*(ptr + i) - '0');
     }
