@@ -4,7 +4,7 @@ PROJECT_NAME="onebrc"
 RUNTIME="linux-x64"
 PUBLISH_DIR="./bin/Release/net10.0/$RUNTIME/publish"
 EXE_PATH="$PUBLISH_DIR/$PROJECT_NAME"
-DATA_FILE="measurements.txt"
+DATA_FILE="${1:-1brc-official/measurements.txt}"
 ITERATIONS=5
 
 echo -e "\033[36m--- 正在发布项目 (Release - $RUNTIME) ---\033[0m"

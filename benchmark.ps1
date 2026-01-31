@@ -3,7 +3,7 @@ $projectName = "onebrc" # 你的项目名称
 $runtime = "win-x64"
 $publishDir = ".\bin\Release\net10.0\$runtime\publish" # 请根据你的 .NET 版本调整 net9.0/net10.0
 $exePath = "$publishDir\$projectName.exe"
-$dataFile = "measurements.txt" # 确保数据文件在当前目录下
+$dataFile = if ($args[0]) { $args[0] } else { "1brc-official/measurements.txt" } # 确保数据文件在当前目录下
 $iterations = 5
 
 # 1. 编译发布
