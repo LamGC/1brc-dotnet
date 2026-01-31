@@ -1,0 +1,3 @@
+[submodule "1brc-official"]
+	path = 1brc-official
+	url = https://github.com/gunnarmorling/1brc
