@@ -15,11 +15,18 @@ using System.Text;
 using System.Diagnostics;
 #endif
 
+if (args.Length == 0)
+{
+    Console.Error.Write("Please specify the dataset path.");
+    Environment.Exit(1);
+}
+
+var filePath = args[0];
+
 #if ENABLE_STOPWATCH
 var stopwatch = Stopwatch.StartNew();
 #endif
 
-const string filePath = "D:/1brc/measurements.txt";
 var resultLock = new Lock();
 var totalResults = new FastGlobalDictionary();
 
