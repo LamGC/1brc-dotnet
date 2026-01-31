@@ -1,11 +1,10 @@
-﻿// #define ENABLE_STOPWATCH
+﻿#define ENABLE_STOPWATCH
 // #define ENABLE_EXPANSION_LOG
 // #define ENABLE_HANDLED_ENTRY_COUNTER
 // #define ENABLE_WORKER_DEBUG_LOG
 // #define USE_ONCE_WORKER
 // #define DISABLE_RESULT_OUTPUT
 
-using System.Collections.Immutable;
 using System.Globalization;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.CompilerServices;
@@ -22,7 +21,7 @@ var stopwatch = Stopwatch.StartNew();
 
 const string filePath = "D:/1brc/measurements.txt";
 var resultLock = new Lock();
-var totalResults = new Dictionary<string, DataEntry>();
+var totalResults = new FastGlobalDictionary();
 
 var fi = new FileInfo(filePath);
 var fileSize = fi.Length;
@@ -41,39 +40,55 @@ var chunkSizePerWorker = fileSize / coreCount;
 var handledEntryCount = 0;
 #endif
 
+GC.TryStartNoGCRegion(10 * 1024 * 1024, true);
+
 Parallel.For(0, coreCount, (i, _) =>
 {
     // ReSharper disable once AccessToDisposedClosure
     DoWork(i, chunkSizePerWorker, mmf);
 });
 
-var sortedSet = totalResults.Keys.ToImmutableSortedSet();
-#if !DISABLE_RESULT_OUTPUT
-Console.Write('{');
-#endif
+
 var first = true;
-for (var index = 0; index < sortedSet.Count; index++)
-{
-    var key = sortedSet[index];
-    var value = totalResults[key];
-    if (value.Count == 0)
-    {
-        continue;
-    }
+var delimiter = ", "u8;
+Console.OutputEncoding = Encoding.UTF8;
+var stdOutputStream = Console.OpenStandardOutput();
 
-    var avg = value.Total / value.Count;
-    if (!first)
-    {
-#if !DISABLE_RESULT_OUTPUT
-        Console.Write(", ");
-#endif
-    }
+var accessIndexes = SortAccessIndexes(totalResults);
 
 #if !DISABLE_RESULT_OUTPUT
-    Console.Write($"{key}={value.Min / 10.0:F1}/{avg / 10.0:F1}/{value.Max / 10.0:F1}");
+    stdOutputStream.WriteByte((byte)'{');
 #endif
-    first = false;
-}
+    for (var index = 0; index < accessIndexes.Length; index++)
+    {
+        var value = totalResults.Entries[accessIndexes[index]];
+        if (value.Count == 0)
+        {
+            continue;
+        }
+
+        if (!first)
+        {
+#if !DISABLE_RESULT_OUTPUT
+            stdOutputStream.Write(delimiter);
+#endif
+        }
+
+#if !DISABLE_RESULT_OUTPUT
+        stdOutputStream.Write(value.Key);
+        stdOutputStream.WriteByte((byte)'=');
+        stdOutputStream.Write(Encoding.UTF8.GetBytes(Round(value.Min / 10.0).ToString("F1", CultureInfo.InvariantCulture)));
+        stdOutputStream.WriteByte((byte)'/');
+        stdOutputStream.Write(Encoding.UTF8.GetBytes(Get1BrcAverage(value.Total, value.Count)
+            .ToString("F1", CultureInfo.InvariantCulture)));
+        stdOutputStream.WriteByte((byte)'/');
+        stdOutputStream.Write(Encoding.UTF8.GetBytes(Round(value.Max / 10.0).ToString("F1", CultureInfo.InvariantCulture)));
+#endif
+        first = false;
+    }
+#if !DISABLE_RESULT_OUTPUT
+    stdOutputStream.WriteByte((byte)'}');
+#endif
 
 #if ENABLE_STOPWATCH
 stopwatch.Stop();
@@ -89,9 +104,23 @@ Console.WriteLine($"Handled Entry Count: {handledEntryCount}");
 #endif
 return;
 
+[MethodImpl(MethodImplOptions.AggressiveInlining)]
+double Round(double value)
+{
+    var rounded = Math.Floor(value * 10.0 + 0.5 + 1e-15);
+    return rounded / 10.0;
+}
+
+[MethodImpl(MethodImplOptions.AggressiveInlining)]
+static double Get1BrcAverage(long total, long count)
+{
+    var valueToRound = (double)total / count;
+    return Math.Floor(valueToRound + 0.5 + 1e-15) / 10.0;
+}
+
 void DoWork(int i, long chunkSize, MemoryMappedFile mappedFile)
 {
-    var localResult = new FastDictionary();
+    var localResult = new FastLocalDictionary();
     unsafe
     {
         var startOffset = i * chunkSize;
@@ -99,7 +128,7 @@ void DoWork(int i, long chunkSize, MemoryMappedFile mappedFile)
 #if ENABLE_WORKER_DEBUG_LOG
         Console.WriteLine($"Worker {i} Started at {startOffset} - {startOffset + chunkSize} - {sizeToMap}");
 #endif
-        
+
         using var accessor = mappedFile.CreateViewAccessor(startOffset, sizeToMap, MemoryMappedFileAccess.Read);
         byte* basePtr = null;
         accessor.SafeMemoryMappedViewHandle.AcquirePointer(ref basePtr);
@@ -108,11 +137,11 @@ void DoWork(int i, long chunkSize, MemoryMappedFile mappedFile)
         var currentPtr = basePtr;
         byte* endOfLogicalChunk;
         var endOfView = basePtr + sizeToMap;
-        if (i == coreCount - 1) 
+        if (i == coreCount - 1)
         {
-            endOfLogicalChunk = endOfView; 
+            endOfLogicalChunk = endOfView;
         }
-        else 
+        else
         {
             endOfLogicalChunk = basePtr + chunkSize;
         }
@@ -131,6 +160,7 @@ void DoWork(int i, long chunkSize, MemoryMappedFile mappedFile)
 #endif
                 return;
             }
+
             currentPtr++;
         }
 
@@ -146,8 +176,7 @@ void DoWork(int i, long chunkSize, MemoryMappedFile mappedFile)
                 {
                     // 处理一行.
                     var valueStarts = bufferIndex;
-                    var value = long.Parse(Encoding.UTF8.GetString(new ReadOnlySpan<byte>(buffer + valueStarts,
-                        valueIndex - valueStarts)), CultureInfo.InvariantCulture);
+                    var value = FastParseLong(buffer + valueStarts, valueIndex - valueStarts);
                     localResult.UpdateOrAdd(startsOfRound, bufferIndex, value);
 
                     if (currentPtr >= endOfLogicalChunk)
@@ -194,14 +223,14 @@ void DoWork(int i, long chunkSize, MemoryMappedFile mappedFile)
                 currentPtr++;
             }
         }
-        
+
 #if ENABLE_WORKER_DEBUG_LOG
         if (currentPtr > endOfView)
         {
             Console.WriteLine($"Worker {i} Ended on {(long)currentPtr:N0}: End Of View");
         }
 #endif
-        
+
 #if ENABLE_WORKER_DEBUG_LOG
         Console.WriteLine($"Worker {i} Actual Ended at {(long)currentPtr:N0} (Actual Read {currentPtr - basePtr:N0}/{chunkSize}({currentPtr - basePtr - chunkSize}), OverRead {currentPtr - endOfLogicalChunk:N0})");
 #endif
@@ -216,23 +245,50 @@ void DoWork(int i, long chunkSize, MemoryMappedFile mappedFile)
                     continue;
                 }
 
-                var keyString = Encoding.UTF8.GetString(entry.KeyOffset, entry.KeyLength);
-                ref var globalEntry =
-                    ref CollectionsMarshal.GetValueRefOrAddDefault(totalResults, keyString, out var exists);
-
-                globalEntry.Count += entry.Count;
-                globalEntry.Total += entry.Total;
-                globalEntry.Max = exists ? Math.Max(globalEntry.Max, entry.Max) : entry.Max;
-                globalEntry.Min = exists ? Math.Min(globalEntry.Min, entry.Min) : entry.Min;
+                totalResults.UpdateOrAdd(ref entry);
             }
         }
-        
+
         accessor.SafeMemoryMappedViewHandle.ReleasePointer();
     }
 }
 
+[MethodImpl(MethodImplOptions.AggressiveInlining)]
+unsafe long FastParseLong(byte* ptr, long len)
+{
+    var isNegative = (char)*ptr == '-';
+    long x = (char)*(ptr + (isNegative ? 1 : 0)) - '0';
+    for (long i = (isNegative ? 2 : 1); i < len; i++)
+    {
+        x = x * 10 + ((char)*(ptr + i) - '0');
+    }
+
+    return isNegative ? -x : x;
+}
+
+[MethodImpl(MethodImplOptions.AggressiveInlining)]
+int[] SortAccessIndexes(FastGlobalDictionary dictionary)
+{
+    var indexes = new int[dictionary.Count];
+    var actualIndex = 0;
+    for (var i = 0; i < dictionary.Entries.Length; i++)
+    {
+        if (dictionary.Entries[i].Count > 0)
+        {
+            indexes[actualIndex++] = i;
+        }
+    }
+
+    indexes.Sort((i1, i2) => totalResults.Entries[i1].Key.AsSpan()
+        .SequenceCompareTo(totalResults.Entries[i2].Key.AsSpan()));
+
+    return indexes;
+}
+
 internal struct DataEntry
 {
+    public ulong Hash;
+    public byte[] Key;
     public long Total;
     public long Count;
     public long Min;
@@ -241,7 +297,7 @@ internal struct DataEntry
 
 internal unsafe struct FastDataEntry
 {
-    public uint Hash;
+    public ulong Hash;
     public byte* KeyOffset;
     public int KeyLength;
     public long Total;
@@ -250,20 +306,20 @@ internal unsafe struct FastDataEntry
     public long Max;
 }
 
-internal unsafe class FastDictionary
+internal unsafe class FastLocalDictionary
 {
-    #if USE_ONCE_WORKER
+#if USE_ONCE_WORKER
     public FastDataEntry[] Entries = new FastDataEntry[30000];
-    #else
+#else
     public FastDataEntry[] Entries = new FastDataEntry[1024];
-    #endif
-    public int Count;
+#endif
+    private int _count;
 
 #if ENABLE_EXPANSION_LOG
     private int _expansionCount;
 #endif
 
-    public ref FastDataEntry GetOrAddDefault(byte* key, int keyLength, out bool exists)
+    private ref FastDataEntry GetOrAddDefault(byte* key, int keyLength, out bool exists)
     {
         var hash = FastHash(key, keyLength);
         ref var entry = ref GetOrAddDefault0(Entries, hash, key, keyLength, out var flag);
@@ -276,9 +332,9 @@ internal unsafe class FastDictionary
         exists = flag == 0;
         if (!exists)
         {
-            Count++;
+            _count++;
 #if !USE_ONCE_WORKER
-            if (Count >= Entries.Length * 0.5)
+            if (_count >= Entries.Length * 0.5)
             {
                 Expansion();
             }
@@ -289,7 +345,7 @@ internal unsafe class FastDictionary
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe bool CompareKey(byte* a, byte* b, int length)
+    private static bool CompareKey(byte* a, byte* b, int length)
     {
         // ---------------------------------------------------------
         // 第一梯队：最常见的长度区间 (8 到 16 字节)
@@ -318,12 +374,12 @@ internal unsafe class FastDictionary
         // ---------------------------------------------------------
         // 第三梯队：短 Key (< 8 字节)
         // ---------------------------------------------------------
-        
+
         // 如果 >= 4 (即 4, 5, 6, 7)
         if (length >= 4)
         {
-            // 同样的逻辑：比头4字节(int)，比尾4字节(int)
-            return (*(uint*)a == *(uint*)b) && 
+            // 同样的逻辑：比头 4 字节(int)，比尾 4 字节(int)
+            return (*(uint*)a == *(uint*)b) &&
                    (*(uint*)(a + length - 4) == *(uint*)(b + length - 4));
         }
 
@@ -337,7 +393,7 @@ internal unsafe class FastDictionary
                 if (*(ushort*)(a + length - 2) != *(ushort*)(b + length - 2)) return false;
             }
         }
-        
+
         return true;
     }
 
@@ -354,15 +410,16 @@ internal unsafe class FastDictionary
             cursor += 8;
             target += 8;
         }
-        
+
         return true;
     }
-    
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ref FastDataEntry GetOrAddDefault0(FastDataEntry[] entries, uint hash, byte* keyOffset, int keyLength,
+    private static ref FastDataEntry GetOrAddDefault0(FastDataEntry[] entries, ulong hash, byte* keyOffset,
+        int keyLength,
         out int flag)
     {
-        var index = hash & (entries.Length - 1);
+        var index = hash & ((uint)entries.Length - 1);
 
         if (entries[index].Hash == 0)
         {
@@ -373,8 +430,8 @@ internal unsafe class FastDictionary
             return ref entries[index];
         }
 
-        if (entries[index].Hash == hash 
-            && entries[index].KeyLength == keyLength 
+        if (entries[index].Hash == hash
+            && entries[index].KeyLength == keyLength
             && CompareKey(entries[index].KeyOffset, keyOffset, keyLength))
         {
             flag = 0;
@@ -384,7 +441,7 @@ internal unsafe class FastDictionary
         var i = 0;
         do
         {
-            index = (index + 1) & (entries.Length - 1);
+            index = (index + 1) & ((uint)entries.Length - 1);
             if (entries[index].Hash == 0)
             {
                 flag = 1;
@@ -394,8 +451,8 @@ internal unsafe class FastDictionary
                 return ref entries[index];
             }
 
-            if (entries[index].Hash == hash 
-                && entries[index].KeyLength == keyLength 
+            if (entries[index].Hash == hash
+                && entries[index].KeyLength == keyLength
                 && CompareKey(entries[index].KeyOffset, keyOffset, keyLength))
             {
                 flag = 0;
@@ -447,7 +504,154 @@ internal unsafe class FastDictionary
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static uint FastHash(byte* ptr, int length)
+    private static ulong FastHash(byte* ptr, int length)
+    {
+        var hash = 2166136261;
+        for (var i = 0; i < length; i++)
+        {
+            hash ^= *(ptr + i);
+            hash *= 16777619;
+        }
+
+        return hash;
+    }
+}
+
+
+internal unsafe class FastGlobalDictionary
+{
+#if USE_ONCE_WORKER
+    public DataEntry[] Entries = new DataEntry[30000];
+#else
+    public DataEntry[] Entries = new DataEntry[1024];
+#endif
+    public int Count;
+
+#if ENABLE_EXPANSION_LOG
+    private int _expansionCount;
+#endif
+
+    private ref DataEntry GetOrAddDefault(byte* key, int keyLength, out bool exists)
+    {
+        var hash = FastHash(key, keyLength);
+        var keyArray = new byte[keyLength];
+        ref var dest = ref MemoryMarshal.GetArrayDataReference(keyArray);
+        Unsafe.CopyBlock(ref dest, ref *key, (uint)keyLength);
+        ref var entry = ref GetOrAddDefault0(Entries, hash, keyArray, out var flag);
+        if (flag == 2)
+        {
+            Expansion();
+            entry = ref GetOrAddDefault0(Entries, hash, keyArray, out flag);
+        }
+
+        exists = flag == 0;
+        if (!exists)
+        {
+            Count++;
+#if !USE_ONCE_WORKER
+            if (Count >= Entries.Length * 0.5)
+            {
+                Expansion();
+            }
+#endif
+        }
+
+        return ref entry;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool CompareKey(byte[] a, byte[] b)
+    {
+        return new ReadOnlySpan<byte>(a).SequenceEqual(b);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ref DataEntry GetOrAddDefault0(DataEntry[] entries, ulong hash, byte[] key,
+        out int flag)
+    {
+        var index = hash & ((uint)entries.Length - 1);
+
+        if (entries[index].Hash == 0)
+        {
+            flag = 1;
+            entries[index].Hash = hash;
+            entries[index].Key = key;
+            return ref entries[index];
+        }
+
+        if (entries[index].Hash == hash
+            && entries[index].Key.Length == key.Length
+            && CompareKey(entries[index].Key, key))
+        {
+            flag = 0;
+            return ref entries[index];
+        }
+
+        var i = 0;
+        do
+        {
+            index = (index + 1) & ((uint)entries.Length - 1);
+            if (entries[index].Hash == 0)
+            {
+                flag = 1;
+                entries[index].Hash = hash;
+                entries[index].Key = key;
+                return ref entries[index];
+            }
+
+            if (entries[index].Hash == hash
+                && entries[index].Key.Length == key.Length
+                && CompareKey(entries[index].Key, key))
+            {
+                flag = 0;
+                return ref entries[index];
+            }
+
+            i++;
+        } while (i < entries.Length);
+
+        flag = 2;
+        return ref entries[index];
+    }
+
+    public void UpdateOrAdd(ref FastDataEntry incoming)
+    {
+        ref var entry = ref GetOrAddDefault(incoming.KeyOffset, incoming.KeyLength, out var exists);
+
+        entry.Count += incoming.Count;
+        entry.Total += incoming.Total;
+        if (!exists || entry.Max < incoming.Max)
+        {
+            entry.Max = incoming.Max;
+        }
+
+        if (!exists || entry.Min > incoming.Min)
+        {
+            entry.Min = incoming.Min;
+        }
+    }
+
+    private void Expansion()
+    {
+        var newEntries = new DataEntry[Entries.Length * 2];
+
+        for (var i = 0; i < Entries.Length; i++)
+        {
+            ref var newSlot = ref GetOrAddDefault0(newEntries, Entries[i].Hash, Entries[i].Key, out _);
+            newSlot.Total += Entries[i].Total;
+            newSlot.Count = Entries[i].Count;
+            newSlot.Min = Entries[i].Min;
+            newSlot.Max = Entries[i].Max;
+        }
+
+#if ENABLE_EXPANSION_LOG
+        Console.WriteLine($"Expansion Completed: {Entries.Length} -> {newEntries.Length}, Count: {++_expansionCount}");
+#endif
+        Entries = newEntries;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong FastHash(byte* ptr, int length)
     {
         var hash = 2166136261;
         for (var i = 0; i < length; i++)
