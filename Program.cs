@@ -107,6 +107,7 @@ for (var index = 0; index < accessIndexes.Length; index++)
 }
 #if !DISABLE_RESULT_OUTPUT
 stdOutputStream.WriteByte((byte)'}');
+stdOutputStream.WriteByte((byte)'\n');
 #endif
 
 #if ENABLE_STOPWATCH
