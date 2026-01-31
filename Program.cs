@@ -34,7 +34,7 @@ var fi = new FileInfo(filePath);
 var fileSize = fi.Length;
 
 using var mmf = MemoryMappedFile.CreateFromFile(
-    filePath, FileMode.Open, "DataSource", 0, MemoryMappedFileAccess.Read);
+    filePath, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
 
 #if USE_ONCE_WORKER
 const int coreCount = 1;
