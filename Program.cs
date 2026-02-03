@@ -8,13 +8,23 @@
 using System.Buffers;
 using System.Buffers.Text;
 using System.IO.MemoryMappedFiles;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Text;
 
 #if ENABLE_STOPWATCH
 using System.Diagnostics;
 #endif
+
+var sequence512 = Vector512.Create(
+    (byte)0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+    48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63
+);
 
 if (args.Length == 0)
 {
@@ -48,8 +58,6 @@ var chunkSizePerWorker = fileSize / coreCount;
 var handledEntryCount = 0;
 #endif
 
-GC.TryStartNoGCRegion(10 * 1024 * 1024, true);
-
 Parallel.For(0, coreCount, (i, _) =>
 {
     // ReSharper disable once AccessToDisposedClosure
@@ -66,6 +74,7 @@ var accessIndexes = SortAccessIndexes(totalResults);
 
 #if !DISABLE_RESULT_OUTPUT
 stdOutputStream.WriteByte((byte)'{');
+var floatFormat = new StandardFormat('F', 1);
 #endif
 
 Span<byte> floatingFormatBuffer = stackalloc byte[6];
@@ -89,18 +98,15 @@ for (var index = 0; index < accessIndexes.Length; index++)
     stdOutputStream.WriteByte((byte)'=');
 
 
-    Utf8Formatter.TryFormat(Round(value.Min / 10.0), floatingFormatBuffer, out var written,
-        new StandardFormat('F', 1));
+    Utf8Formatter.TryFormat(Round(value.Min / 10.0), floatingFormatBuffer, out var written, floatFormat);
     stdOutputStream.Write(floatingFormatBuffer[..written]);
     stdOutputStream.WriteByte((byte)'/');
     
-    Utf8Formatter.TryFormat(Get1BrcAverage(value.Total, value.Count), floatingFormatBuffer, out written,
-        new StandardFormat('F', 1));
+    Utf8Formatter.TryFormat(Get1BrcAverage(value.Total, value.Count), floatingFormatBuffer, out written, floatFormat);
     stdOutputStream.Write(floatingFormatBuffer[..written]);
     stdOutputStream.WriteByte((byte)'/');
     
-    Utf8Formatter.TryFormat(Round(value.Max / 10.0), floatingFormatBuffer, out written,
-        new StandardFormat('F', 1));
+    Utf8Formatter.TryFormat(Round(value.Max / 10.0), floatingFormatBuffer, out written, floatFormat);
     stdOutputStream.Write(floatingFormatBuffer[..written]);
 #endif
     first = false;
@@ -168,79 +174,71 @@ void DoWork(int i, long chunkSize, MemoryMappedFile mappedFile)
 
         if (i > 0)
         {
-            while (currentPtr < endOfLogicalChunk && *currentPtr != (byte)'\n')
-            {
-                currentPtr++;
-            }
-
-            if (currentPtr >= endOfView)
-            {
 #if ENABLE_WORKER_DEBUG_LOG
-                Console.WriteLine($"Worker {i} Ended on {(long)currentPtr:X}: End Of View on Starting");
+            var skipCount = 0;
 #endif
-                return;
-            }
-
-            currentPtr++;
-        }
-
-        var buffer = stackalloc byte[168];
-        var bufferIndex = 0;
-        var valueIndex = 0;
-        var startsOfRound = currentPtr;
-        while (currentPtr < endOfView)
-        {
-            try
+            do
             {
-                if (*currentPtr == (byte)'\n')
+                var (validLength, lineSeparatorMask) = FindLineSeparatorMask(currentPtr, endOfView - currentPtr);
+                if (lineSeparatorMask == 0)
                 {
-                    // 处理一行.
-                    var valueStarts = bufferIndex;
-                    var value = FastParseLong(buffer + valueStarts, valueIndex - valueStarts);
-                    localResult.UpdateOrAdd(startsOfRound, bufferIndex, value);
-
-                    if (currentPtr >= endOfLogicalChunk)
-                    {
-#if ENABLE_WORKER_DEBUG_LOG
-                        Console.WriteLine($"Worker {i} Ended on {(long)currentPtr:N0}: End of Chunk");
-#endif
-#if ENABLE_HANDLED_ENTRY_COUNTER
-                        Interlocked.Increment(ref handledEntryCount);
-#endif
-                        break;
-                    }
-
-                    // 重置状态准备处理下一行.
-                    bufferIndex = 0;
-                    valueIndex = 0;
-                    startsOfRound = currentPtr + 1;
-#if ENABLE_HANDLED_ENTRY_COUNTER
-                    Interlocked.Increment(ref handledEntryCount);
-#endif
-                    continue;
-                }
-
-                if (*currentPtr == (byte)';')
-                {
-                    valueIndex = bufferIndex;
-                    continue;
-                }
-
-                if (valueIndex == 0)
-                {
-                    buffer[bufferIndex++] = *currentPtr;
+                    currentPtr += validLength;
                 }
                 else
                 {
-                    if (*currentPtr != (byte)'.')
+                    var firstLineSeparatorIndex = BitOperations.TrailingZeroCount(lineSeparatorMask);
+                    currentPtr += firstLineSeparatorIndex + 1;
+                    if (currentPtr >= endOfView)
                     {
-                        buffer[valueIndex++] = *currentPtr;
+                        return;
                     }
+
+                    break;
                 }
-            }
-            finally
+#if ENABLE_WORKER_DEBUG_LOG
+                skipCount++;
+#endif
+            } while(currentPtr < endOfView);
+            
+#if ENABLE_WORKER_DEBUG_LOG
+            Console.WriteLine($"Worker {i} Skipped {currentPtr - basePtr} at {skipCount} Iterators.");
+#endif
+        }
+
+        var lineStartPtr = currentPtr;
+        while (currentPtr < endOfView)
+        {
+            var (moveStep, delimiterMask, lineSeparatorMask) = FindAllDelimiterMasks(currentPtr, endOfView - currentPtr);
+            
+            if (lineSeparatorMask == 0)
             {
-                currentPtr++;
+                currentPtr += moveStep;
+                continue;
+            }
+            
+            while (lineSeparatorMask != 0)
+            {
+                var delimiterIndex = BitOperations.TrailingZeroCount(delimiterMask);
+                var lineSeparatorIndex = BitOperations.TrailingZeroCount(lineSeparatorMask);
+
+                var delimiterPtr = currentPtr + delimiterIndex;
+                var lineSeparatorPtr = currentPtr + lineSeparatorIndex;
+                
+                var keyLength = delimiterPtr - lineStartPtr;
+                var value = FastParseFloatingToLong(delimiterPtr + 1, lineSeparatorPtr - delimiterPtr - 1);
+
+                localResult.UpdateOrAdd(lineStartPtr, (int)keyLength, value);
+
+                lineStartPtr = lineSeparatorPtr + 1;
+
+                lineSeparatorMask &= lineSeparatorMask - 1;
+                delimiterMask &= ~((1UL << (lineSeparatorIndex + 1)) - 1);
+            }
+
+            currentPtr = lineStartPtr;
+            if (currentPtr >= endOfLogicalChunk)
+            {
+                break;
             }
         }
 
@@ -273,14 +271,169 @@ void DoWork(int i, long chunkSize, MemoryMappedFile mappedFile)
     }
 }
 
+// 使用 AVX 快速查找分号和换行符.
+// 返回的 4 个 byte 中, 第一个是这次移动了多少 byte, 第二个是分号的位置, 第三个是换行符的位置.
+// 这里计划是把负号也加进去的, 但是可能会被 StationName 干扰, 因此不可行.
+// 如果 StationName 明确不包括负号的情况下, 这里可以配合 Worker 实现快速符号位设置.
+// 后面再试试.
 [MethodImpl(MethodImplOptions.AggressiveInlining)]
-unsafe long FastParseLong(byte* ptr, long len)
+unsafe (uint, ulong, ulong) FindAllDelimiterMasks(byte* ptr, long maxSize)
 {
-    var isNegative = (char)*ptr == '-';
+    var stepSize = Vector512.IsHardwareAccelerated ? 64u : 32u;
+    var size = (int)Math.Min(stepSize, maxSize);
+    if (size <= 0)
+    {
+        return (stepSize, 0, 0);
+    }
+    
+    if (Vector512.IsHardwareAccelerated)
+    {
+        Vector512<byte> data;
+        if (size == stepSize)
+        {
+            data = Vector512.Load(ptr);
+        }
+        else
+        {
+            var vN = Vector512.Create((byte)size);
+            data = Avx512BW.MaskLoad(ptr, Vector512.LessThan(sequence512, vN), Vector512<byte>.Zero);
+        }
+    
+        var delimiterMask = Vector512.Create((byte)';');
+        var lineSeparatorMask = Vector512.Create((byte)'\n');
+
+        var delimiterResult = Vector512.Equals(data, delimiterMask);
+        var lineSeparatorResult = Vector512.Equals(data, lineSeparatorMask);
+
+        var delimiterResultMask = delimiterResult.ExtractMostSignificantBits();
+        var lineSeparatorResultMask = lineSeparatorResult.ExtractMostSignificantBits();
+
+        return (stepSize, delimiterResultMask, lineSeparatorResultMask);
+    }
+    else
+    {
+        var delimiterMask = Vector256.Create((byte)';');
+        var lineSeparatorMask = Vector256.Create((byte)'\n');
+        
+        if (size == stepSize)
+        {
+            var data = Vector256.Load(ptr);
+            
+            var delimiterResult = Vector256.Equals(data, delimiterMask);
+            var lineSeparatorResult = Vector256.Equals(data, lineSeparatorMask);
+
+            var delimiterResultMask = delimiterResult.ExtractMostSignificantBits();
+            var lineSeparatorResultMask = lineSeparatorResult.ExtractMostSignificantBits();
+
+            return (stepSize, delimiterResultMask, lineSeparatorResultMask);
+        }
+        else
+        {
+            var fullInts = size >> 2; // n / 4 向下
+            var tail     = size &  3; // n % 4
+
+            var indices = Vector256.Create(0, 1, 2, 3, 4, 5, 6, 7);
+            var mask = Vector256.LessThan(indices, Vector256.Create(fullInts));
+
+            var data = Unsafe.BitCast<Vector256<int>, Vector256<byte>>(Avx2.MaskLoad((int*)ptr, mask));
+            
+            var delimiterResult = Vector256.Equals(data, delimiterMask);
+            var lineSeparatorResult = Vector256.Equals(data, lineSeparatorMask);
+            
+            var delimiterResultMask = delimiterResult.ExtractMostSignificantBits();
+            var lineSeparatorResultMask = lineSeparatorResult.ExtractMostSignificantBits();
+
+            var baseOffset = fullInts << 2;
+            for (var i = 0; i < tail; i++)
+            {
+                switch (ptr[baseOffset + i])
+                {
+                    case (byte)'\n':
+                        lineSeparatorResultMask |= 1u << (baseOffset + i);
+                        break;
+                    case (byte)';':
+                        delimiterResultMask |= 1u << (baseOffset + i);
+                        break;
+                }
+            }
+
+            return (stepSize, delimiterResultMask, lineSeparatorResultMask);
+        }
+    }
+}
+
+// 第一位是有效输出字节数, 如果支持启用 AVX512, 则固定为 64, 如果降级到 AVX2, 则固定是 32.
+// 第二个是掩码结果.
+// 分两个出来可以避免无意义的计算, 加快 Worker 启动速度.
+[MethodImpl(MethodImplOptions.AggressiveInlining)]
+unsafe (uint, ulong) FindLineSeparatorMask(byte* ptr, long maxSize)
+{
+    var stepSize = Vector512.IsHardwareAccelerated ? 64u : 32u;
+    var size = (int)Math.Min(stepSize, maxSize);
+    if (size <= 0)
+    {
+        return (stepSize, 0);
+    }
+    
+    if (Vector512.IsHardwareAccelerated)
+    {
+        var vN = Vector512.Create((byte)size);
+        var data = Avx512BW.MaskLoad(ptr, Vector512.LessThan(sequence512, vN), Vector512<byte>.Zero);
+        var lineSeparatorMask = Vector512.Create((byte)'\n');
+    
+        var lineSeparatorResult = Vector512.Equals(data, lineSeparatorMask);
+        var lineSeparatorResultMask = lineSeparatorResult.ExtractMostSignificantBits();
+
+        return (stepSize, lineSeparatorResultMask);
+    }
+
+    var nl  = Vector256.Create((byte)'\n');
+    if (size == 32)
+    {
+        var data = Vector256.Load(ptr);
+        var cmp = Vector256.Equals(data, nl);
+        var m = cmp.ExtractMostSignificantBits();
+        return (stepSize, m);
+    }
+    else
+    {
+        var fullInts = size >> 2; // n / 4 向下
+        var tail     = size &  3; // n % 4
+
+        var indices = Vector256.Create(0, 1, 2, 3, 4, 5, 6, 7);
+        var mask = Vector256.LessThan(indices, Vector256.Create(fullInts));
+        
+        var data = Unsafe.BitCast<Vector256<int>, Vector256<byte>>(Avx2.MaskLoad((int*)ptr, mask));
+        var lineSeparatorResult = Avx2.CompareEqual(data, nl);
+        var lineSeparatorMask = lineSeparatorResult.ExtractMostSignificantBits();
+
+        // 走循环处理末尾不足位
+        var baseOffset = fullInts << 2;
+        for (var i = 0; i < tail; i++)
+        {
+            if (ptr[baseOffset + i] == (byte)'\n')
+            {
+                lineSeparatorMask |= 1u << (baseOffset + i);
+            }
+        }
+
+        lineSeparatorMask &= (uint)((1UL << size) - 1UL);
+        return (stepSize, lineSeparatorMask);
+    }
+}
+
+[MethodImpl(MethodImplOptions.AggressiveInlining)]
+unsafe long FastParseFloatingToLong(byte* ptr, long len)
+{
+    var isNegative = *ptr == (byte)'-';
     long x = (char)*(ptr + (isNegative ? 1 : 0)) - '0';
     for (long i = isNegative ? 2 : 1; i < len; i++)
     {
-        x = x * 10 + ((char)*(ptr + i) - '0');
+        if (*(ptr + i) == (byte)'.')
+        {
+            continue;
+        }
+        x = x * 10 + (*(ptr + i) - '0');
     }
 
     return isNegative ? -x : x;
@@ -315,6 +468,7 @@ internal struct DataEntry
     public long Max;
 }
 
+[StructLayout(LayoutKind.Sequential, Size = 64)]
 internal unsafe struct FastDataEntry
 {
     public ulong Hash;
@@ -332,8 +486,8 @@ internal unsafe class FastLocalDictionary
     public FastDataEntry[] Entries = new FastDataEntry[30000];
 #else
     public FastDataEntry[] Entries = new FastDataEntry[1024];
-#endif
     private int _count;
+#endif
 
 #if ENABLE_EXPANSION_LOG
     private int _expansionCount;
@@ -350,16 +504,16 @@ internal unsafe class FastLocalDictionary
         }
 
         exists = flag == 0;
+#if !USE_ONCE_WORKER
         if (!exists)
         {
             _count++;
-#if !USE_ONCE_WORKER
-            if (_count >= Entries.Length * 0.5)
+            if (_count >= Entries.Length * 1)
             {
                 Expansion();
             }
-#endif
         }
+#endif
 
         return ref entry;
     }
@@ -373,16 +527,18 @@ internal unsafe class FastLocalDictionary
         // ---------------------------------------------------------
         if (length >= 8)
         {
-            // 1. 先比头 8 个字节 (把指针当 ulong 读)
-            if (*(ulong*)a != *(ulong*)b) return false;
+            if (length <= 16)
+            {
+                // 1. 先比头 8 个字节 (把指针当 ulong 读)
+                if (*(ulong*)a != *(ulong*)b)
+                {
+                    return false;
+                }
 
-            // 2. 再比尾 8 个字节 (Overlapping 重叠读取)
-            // 哪怕 length 是 8，这行代码也是安全的（原地重叠）
-            if (*(ulong*)(a + length - 8) != *(ulong*)(b + length - 8)) return false;
-
-            // 3. 如果长度 <= 16，上面两步已经覆盖了所有字节，直接返回 true
-            // 这是最快路径！
-            if (length <= 16) return true;
+                // 2. 再比尾 8 个字节 (Overlapping 重叠读取)
+                // 哪怕 length 是 8，这行代码也是安全的（原地重叠）
+                return *(ulong*)(a + length - 8) == *(ulong*)(b + length - 8);
+            }
 
             // ---------------------------------------------------------
             // 第二梯队：长 Key (> 16 字节)
@@ -399,8 +555,8 @@ internal unsafe class FastLocalDictionary
         if (length >= 4)
         {
             // 同样的逻辑：比头 4 字节(int)，比尾 4 字节(int)
-            return (*(uint*)a == *(uint*)b) &&
-                   (*(uint*)(a + length - 4) == *(uint*)(b + length - 4));
+            return *(uint*)a == *(uint*)b &&
+                   *(uint*)(a + length - 4) == *(uint*)(b + length - 4);
         }
 
         // 极短 Key (0, 1, 2, 3)
@@ -420,18 +576,7 @@ internal unsafe class FastLocalDictionary
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool CompareKeyLong(byte* a, byte* b, int length)
     {
-        var cursor = a + 8;
-        var target = b + 8;
-        var end = a + length - 8;
-
-        while (cursor < end)
-        {
-            if (*(ulong*)cursor != *(ulong*)target) return false;
-            cursor += 8;
-            target += 8;
-        }
-
-        return true;
+        return new ReadOnlySpan<byte>(a, length).SequenceEqual(new ReadOnlySpan<byte>(b, length));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -511,7 +656,7 @@ internal unsafe class FastLocalDictionary
         {
             ref var newSlot = ref GetOrAddDefault0(newEntries, Entries[i].Hash, Entries[i].KeyOffset,
                 Entries[i].KeyLength, out _);
-            newSlot.Total += Entries[i].Total;
+            newSlot.Total = Entries[i].Total;
             newSlot.Count = Entries[i].Count;
             newSlot.Min = Entries[i].Min;
             newSlot.Max = Entries[i].Max;
@@ -569,7 +714,7 @@ internal unsafe class FastGlobalDictionary
         {
             Count++;
 #if !USE_ONCE_WORKER
-            if (Count >= Entries.Length * 0.5)
+            if (Count >= Entries.Length * 1)
             {
                 Expansion();
             }
