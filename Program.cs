@@ -206,22 +206,26 @@ void DoWork(int i, long chunkSize, MemoryMappedFile mappedFile)
         }
 
         var lineStartPtr = currentPtr;
+        byte* delimiterPtr = null;
         while (currentPtr < endOfView)
         {
             var (moveStep, delimiterMask, lineSeparatorMask) = FindAllDelimiterMasks(currentPtr, endOfView - currentPtr);
             
-            if (lineSeparatorMask == 0)
-            {
-                currentPtr += moveStep;
-                continue;
-            }
-            
-            while (lineSeparatorMask != 0)
+            while (true)
             {
                 var delimiterIndex = BitOperations.TrailingZeroCount(delimiterMask);
                 var lineSeparatorIndex = BitOperations.TrailingZeroCount(lineSeparatorMask);
 
-                var delimiterPtr = currentPtr + delimiterIndex;
+                if (delimiterIndex != 64 && (lineSeparatorIndex == 64 || lineSeparatorIndex > delimiterIndex))
+                {
+                    delimiterPtr = currentPtr + delimiterIndex;
+                }
+
+                if (lineSeparatorIndex == 64)
+                {
+                    break;
+                }
+                
                 var lineSeparatorPtr = currentPtr + lineSeparatorIndex;
                 
                 var keyLength = delimiterPtr - lineStartPtr;
@@ -235,7 +239,7 @@ void DoWork(int i, long chunkSize, MemoryMappedFile mappedFile)
                 delimiterMask &= ~((1UL << (lineSeparatorIndex + 1)) - 1);
             }
 
-            currentPtr = lineStartPtr;
+            currentPtr += moveStep;
             if (currentPtr >= endOfLogicalChunk)
             {
                 break;
