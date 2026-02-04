@@ -30,6 +30,7 @@ if (args.Length == 0)
 {
     Console.Error.Write("Please specify the dataset path.");
     Environment.Exit(1);
+    return;
 }
 
 var filePath = args[0];
@@ -211,21 +212,28 @@ void DoWork(int i, long chunkSize, MemoryMappedFile mappedFile)
         {
             var (moveStep, delimiterMask, lineSeparatorMask) = FindAllDelimiterMasks(currentPtr, endOfView - currentPtr);
             
-            while (true)
+            while (!Vector512.IsHardwareAccelerated || lineSeparatorMask != 0)
             {
                 var delimiterIndex = BitOperations.TrailingZeroCount(delimiterMask);
                 var lineSeparatorIndex = BitOperations.TrailingZeroCount(lineSeparatorMask);
 
-                if (delimiterIndex != 64 && (lineSeparatorIndex == 64 || lineSeparatorIndex > delimiterIndex))
+                if (Vector512.IsHardwareAccelerated)
                 {
                     delimiterPtr = currentPtr + delimiterIndex;
                 }
-
-                if (lineSeparatorIndex == 64)
+                else
                 {
-                    break;
+                    if (delimiterIndex != 64 && (lineSeparatorIndex == 64 || lineSeparatorIndex > delimiterIndex))
+                    {
+                        delimiterPtr = currentPtr + delimiterIndex;
+                    }
+
+                    if (lineSeparatorIndex == 64)
+                    {
+                        break;
+                    }
                 }
-                
+
                 var lineSeparatorPtr = currentPtr + lineSeparatorIndex;
                 
                 var keyLength = delimiterPtr - lineStartPtr;
@@ -239,7 +247,13 @@ void DoWork(int i, long chunkSize, MemoryMappedFile mappedFile)
                 delimiterMask &= ~((1UL << (lineSeparatorIndex + 1)) - 1);
             }
 
-            currentPtr += moveStep;
+            if (Vector512.IsHardwareAccelerated)
+            {
+                currentPtr = lineStartPtr;
+            } else {
+                currentPtr += moveStep;
+            }
+
             if (currentPtr >= endOfLogicalChunk)
             {
                 break;
