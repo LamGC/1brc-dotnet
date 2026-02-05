@@ -446,12 +446,12 @@ unsafe long FastParseFloatingToLong(byte* ptr, long len)
     var raw = *(ulong*)ptr;
     
     var isNegative = (raw & 0b11111111) == 0b101101;
-    var negative = 0b00000000;
+    var negative = 0;
     if (isNegative)
     {
         ptr++; 
         len--;
-        negative = 0b10000000;
+        negative = 1 << (sizeof(int) * 8 - 1);
     }
 
     var result = len switch
