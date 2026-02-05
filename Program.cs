@@ -443,18 +443,27 @@ unsafe (uint, ulong) FindLineSeparatorMask(byte* ptr, long maxSize)
 [MethodImpl(MethodImplOptions.AggressiveInlining)]
 unsafe long FastParseFloatingToLong(byte* ptr, long len)
 {
-    var isNegative = *ptr == (byte)'-';
-    long x = (char)*(ptr + (isNegative ? 1 : 0)) - '0';
-    for (long i = isNegative ? 2 : 1; i < len; i++)
+    var raw = *(ulong*)ptr;
+    
+    var isNegative = (raw & 0b11111111) == 0b101101;
+    var negative = 0b00000000;
+    if (isNegative)
     {
-        if (*(ptr + i) == (byte)'.')
-        {
-            continue;
-        }
-        x = x * 10 + (*(ptr + i) - '0');
+        ptr++; 
+        len--;
+        negative = 0b10000000;
     }
 
-    return isNegative ? -x : x;
+    var result = len switch
+    {
+        // \d\.\d
+        3 => (ptr[0] - '0') * 10 + (ptr[2] - '0'),
+        // \d{2}\.\d
+        4 => (ptr[0] - '0') * 100 + (ptr[1] - '0') * 10 + (ptr[3] - '0'),
+        _ => 0
+    };
+
+    return result | negative;
 }
 
 [MethodImpl(MethodImplOptions.AggressiveInlining)]
